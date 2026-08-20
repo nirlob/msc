@@ -1,0 +1,703 @@
+# MSC Reference Server — OpenAPI 3.1 contract.
+#
+# This file is the **source of truth** for the MSC reference server's
+# HTTP contract. server.py implements it. scripts/sync_openapi.py
+# verifies that the live OpenAPI document (generated from server.py)
+# stays in sync with this file.
+#
+# Regenerate the client from this file directly, no server required:
+#
+#     openapi-python-client generate \
+#         --path openapi.yaml \
+#         --output-path client_generated \
+#         --overwrite
+#
+openapi: 3.1.0
+info:
+  title: MSC Reference Server
+  version: '0.1'
+  summary: Model Solution Client — reference implementation of draft-msc-protocol-00
+  description: |
+    MSC is the protocol counterpart of MCP: where MCP lets an LLM
+    *consume* resources from the web (read), MSC lets an LLM *emit*
+    contributions back to a web site (write), with the user's consent
+    and under the receiving site's moderation.
+
+    All write endpoints require three headers:
+
+      - `MSC-Origin`     — `model_id:user_id`
+      - `MSC-Origin-Key` — `ed25519:<base64url>` public key
+      - `MSC-Signature`  — `ed25519:<base64url>` of the request body
+
+    See `msc-rfc-protocol.md` for the full specification.
+  contact:
+    name: MSC Protocol Authors
+    url: https://github.com/msc-protocol
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:8000
+    description: Local dev
+  - url: https://api.example.com
+    description: Production (placeholder)
+
+tags:
+  - name: discovery
+    description: |
+      Service discovery. A site publishes a manifest at
+      `/.well-known/msc.json` so agents can find the submission
+      endpoint and accepted types.
+  - name: submission
+    description: |
+      Signed submission of a contribution. The signature covers the
+      exact bytes of the JSON payload.
+  - name: moderation
+    description: |
+      Endpoints used by humans (or admin tools) to manage the queue
+      of pending contributions.
+  - name: audit
+    description: |
+      Append-only decision log. Entries are never updated or deleted;
+      corrections are appended as new entries.
+
+paths:
+
+  # ---------- discovery ----------
+
+  /.well-known/msc.json:
+    get:
+      tags: [discovery]
+      summary: Discovery manifest
+      description: |
+        Advertises MSC support: submission endpoint, accepted types,
+        auth methods, and rate-limit policy. Agents should fetch this
+        first.
+      operationId: discovery
+      responses:
+        "200":
+          description: Discovery manifest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryManifest'
+              examples:
+                minimal:
+                  summary: Minimal discovery manifest
+                  value:
+                    msc_version: '0.1'
+                    endpoint: http://localhost:8000/msc/contributions
+                    status_endpoint: http://localhost:8000/msc/status
+                    auth_methods: [ed25519]
+                    accepted_types: [comment, edit, alternative,
+                                     translation, related, example]
+                    policy_url: http://localhost:8000/msc/policy
+                    rate_limit:
+                      per_ip: 100
+                      per_model: 1000
+                      window: '1h'
+
+  /msc/capabilities:
+    get:
+      tags: [discovery]
+      summary: Human-readable capabilities
+      operationId: capabilities
+      responses:
+        "200":
+          description: Server capabilities summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capabilities'
+
+  /msc/policy:
+    get:
+      tags: [discovery]
+      summary: Site policy (plain text)
+      operationId: policy
+      responses:
+        "200":
+          description: Free-form site policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+
+  # ---------- submission ----------
+
+  /msc/contributions:
+    post:
+      tags: [submission]
+      summary: Submit a signed contribution
+      description: |
+        Validates the Ed25519 signature, parses the body as a
+        `Contribution`, applies auto-reject filters and the auto-accept
+        policy, then queues for human review or returns a final status.
+      operationId: submitContribution
+      parameters:
+        - $ref: '#/components/parameters/MSCOrigin'
+        - $ref: '#/components/parameters/MSCOriginKey'
+        - $ref: '#/components/parameters/MSCSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Contribution'
+            example:
+              msc_version: '0.1'
+              id: '01M0GJ31JQ70WXXJM3SJS61P7T'
+              timestamp: '2026-08-20T10:30:00Z'
+              source:
+                url: https://stackoverflow.com/q/123456
+                canonical: https://stackoverflow.com/q/123456#a456
+              type: comment
+              body: >-
+                In Python 3.11+, asyncio.TaskGroup is preferable to
+                asyncio.gather because it provides automatic structured
+                concurrency and exception propagation across tasks.
+              language: en
+              confidence: 0.85
+              user_attribution: anonymous
+              license: CC-BY-SA-4.0
+              tags: [python, asyncio]
+              context:
+                model_id: claude-opus-4.1
+                session_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                consent_token: 'tok-01m0gj31jq70wxxjm3sjs61p7t'
+      responses:
+        "202":
+          description: |
+            Accepted (or rejected by the server, with status: rejected).
+            In all cases the contribution has been persisted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitResponse'
+              examples:
+                auto_accepted:
+                  summary: Auto-accepted (high confidence, safe type)
+                  value:
+                    id: '01M0GJ31JQ70WXXJM3SJS61P7T'
+                    status: accepted
+                    review_url: /msc/status/01M0GJ31JQ70WXXJM3SJS61P7T
+                queued:
+                  summary: Queued for human review
+                  value:
+                    id: '01M0GJ36CB04Q64FQRSGKV0M5G'
+                    status: queued
+                    review_url: /msc/status/01M0GJ36CB04Q64FQRSGKV0M5G
+                auto_rejected:
+                  summary: Auto-rejected (matched sensitive-data pattern)
+                  value:
+                    id: '01M0GJ3BJYG1KXP15KW7XH0NQC'
+                    status: rejected
+                    review_url: /msc/status/01M0GJ3BJYG1KXP15KW7XH0NQC
+        "401":
+          $ref: '#/components/responses/BadSignature'
+        "409":
+          $ref: '#/components/responses/Duplicate'
+        "422":
+          $ref: '#/components/responses/ValidationError'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+    get:
+      tags: [moderation]
+      summary: List contributions (moderation queue view)
+      description: |
+        Lists metadata only (no full payload). Use `/msc/status/{id}`
+        for individual detail, or `/msc/audit` for the decision trail.
+      operationId: listContributions
+      parameters:
+        - name: status_filter
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [queued, accepted, rejected, edited, withdrawn]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: List of contributions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ContributionListItem'
+        "422":
+          $ref: '#/components/responses/ValidationError'
+
+  /msc/status/{contribution_id}:
+    get:
+      tags: [submission]
+      summary: Get the status of one contribution
+      operationId: getStatus
+      parameters:
+        - name: contribution_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current status of the contribution
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        "404":
+          description: Contribution not found
+        "422":
+          $ref: '#/components/responses/ValidationError'
+
+  /msc/contributions/{contribution_id}/decision:
+    post:
+      tags: [moderation]
+      summary: Moderator decision on a queued contribution
+      description: |
+        Records an `accept`, `reject`, `edit`, or `withdraw` decision in
+        the append-only audit log.
+      operationId: decideContribution
+      parameters:
+        - name: contribution_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRequest'
+      responses:
+        "200":
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  status:
+                    type: string
+        "404":
+          description: Contribution not found
+        "422":
+          $ref: '#/components/responses/ValidationError'
+
+  # ---------- audit ----------
+
+  /msc/audit:
+    get:
+      tags: [audit]
+      summary: Append-only audit log
+      description: |
+        Every contribution submission, auto-decision and moderator
+        decision produces one entry. Entries are append-only and never
+        modified.
+      operationId: listAudit
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 100
+      responses:
+        "200":
+          description: Audit entries (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditEntry'
+        "422":
+          $ref: '#/components/responses/ValidationError'
+
+# ---------- components ----------
+
+components:
+
+  # ----- reusable parameters -----
+
+  parameters:
+    MSCOrigin:
+      name: MSC-Origin
+      in: header
+      required: true
+      description: '`model_id:user_id`'
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+
+    MSCOriginKey:
+      name: MSC-Origin-Key
+      in: header
+      required: true
+      description: '`ed25519:<base64url>` public key'
+      schema:
+        type: string
+        pattern: '^ed25519:[A-Za-z0-9_-]+$'
+
+    MSCSignature:
+      name: MSC-Signature
+      in: header
+      required: true
+      description: '`ed25519:<base64url>` of the body'
+      schema:
+        type: string
+        pattern: '^ed25519:[A-Za-z0-9_-]+$'
+
+  # ----- reusable responses -----
+
+  responses:
+    BadSignature:
+      description: Signature verification failed or origin not registered
+      content:
+        application/json:
+          example:
+            detail: signature verification failed
+
+    Duplicate:
+      description: A contribution with this `id` has already been submitted
+      content:
+        application/json:
+          example:
+            detail: duplicate contribution id
+
+    ValidationError:
+      description: Payload validation failed (Pydantic)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPValidationError'
+          example:
+            detail:
+              - loc: [body, confidence]
+                msg: Input should be less than or equal to 1
+                type: less_than_equal
+
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        RateLimit-Limit:
+          schema:
+            type: integer
+          description: Configured limit for the bucket that was exceeded
+        RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Always 0 on a 429
+      content:
+        application/json:
+          example:
+            error: rate_limited
+            message: rate limit exceeded
+
+  # ----- schemas -----
+
+  schemas:
+
+    DiscoveryManifest:
+      type: object
+      required: [msc_version, endpoint, auth_methods, accepted_types]
+      properties:
+        msc_version:
+          type: string
+          pattern: '^\d+\.\d+$'
+        endpoint:
+          type: string
+          format: uri
+        status_endpoint:
+          type: string
+          format: uri
+        auth_methods:
+          type: array
+          items:
+            type: string
+            enum: [ed25519, jwt]
+        accepted_types:
+          type: array
+          items:
+            type: string
+            enum: [comment, edit, alternative, translation, related, example]
+        policy_url:
+          type: string
+          format: uri
+        rate_limit:
+          type: object
+          properties:
+            per_ip:
+              type: integer
+            per_model:
+              type: integer
+            window:
+              type: string
+
+    Capabilities:
+      type: object
+      properties:
+        msc_version:
+          type: string
+        endpoints:
+          type: array
+          items:
+            type: string
+        auto_accept_below_confidence:
+          type: number
+        auto_reject_patterns:
+          type: array
+          items:
+            type: string
+
+    Policy:
+      type: object
+      properties:
+        summary:
+          type: string
+        moderation:
+          type: string
+        erasure:
+          type: string
+
+    ContributionType:
+      type: string
+      enum: [comment, edit, alternative, translation, related, example]
+
+    Language:
+      type: string
+      enum: [en, es, fr, de, pt, it, ja, zh, ru, ar, other]
+
+    Attribution:
+      type: string
+      enum: [anonymous, username, real_name]
+
+    Source:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        canonical:
+          type: string
+          maxLength: 2048
+        hash:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+        fetched_at:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
+
+    Context:
+      type: object
+      required: [model_id, session_hash, consent_token]
+      properties:
+        model_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        session_hash:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+        consent_token:
+          type: string
+          minLength: 8
+          maxLength: 256
+        diff:
+          type: string
+          maxLength: 20000
+
+    Contribution:
+      type: object
+      required:
+        - msc_version
+        - id
+        - timestamp
+        - source
+        - type
+        - body
+        - confidence
+        - license
+        - context
+      properties:
+        msc_version:
+          type: string
+          pattern: '^\d+\.\d+$'
+          default: '0.1'
+        id:
+          type: string
+          minLength: 10
+          maxLength: 64
+          description: ULID, generated by the client
+        timestamp:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
+        source:
+          $ref: '#/components/schemas/Source'
+        type:
+          $ref: '#/components/schemas/ContributionType'
+        body:
+          type: string
+          minLength: 10
+          maxLength: 20000
+          examples:
+            - >-
+              In Python 3.11+, asyncio.TaskGroup is preferable to
+              asyncio.gather because it provides automatic structured
+              concurrency.
+        language:
+          $ref: '#/components/schemas/Language'
+          default: en
+        confidence:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+        user_attribution:
+          $ref: '#/components/schemas/Attribution'
+          default: anonymous
+        license:
+          type: string
+          minLength: 2
+          maxLength: 64
+        tags:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+            minLength: 1
+            maxLength: 32
+            pattern: '^[a-z0-9\-_]+$'
+        context:
+          $ref: '#/components/schemas/Context'
+
+    SubmitResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued, accepted, rejected, edited, withdrawn]
+        review_url:
+          type: string
+
+    StatusResponse:
+      type: object
+      required: [id, status, created_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued, accepted, rejected, edited, withdrawn]
+        decision:
+          type: string
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        moderator_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+        decided_at:
+          type: string
+          nullable: true
+
+    ContributionListItem:
+      type: object
+      required: [id, origin, status, created_at]
+      properties:
+        id:
+          type: string
+        origin:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+        decided_at:
+          type: string
+          nullable: true
+        decision:
+          type: string
+          nullable: true
+
+    DecisionRequest:
+      type: object
+      required: [decision, moderator_id]
+      properties:
+        decision:
+          type: string
+          enum: [accept, reject, edit, withdraw]
+        reason:
+          type: string
+          maxLength: 500
+        moderator_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        edited_body:
+          type: string
+          maxLength: 20000
+
+    AuditEntry:
+      type: object
+      required: [id, decision, moderator_id, timestamp]
+      properties:
+        id:
+          type: integer
+        contribution_id:
+          type: string
+          nullable: true
+        decision:
+          type: string
+        reason:
+          type: string
+          nullable: true
+        moderator_id:
+          type: string
+        timestamp:
+          type: string
+
+    HTTPValidationError:
+      type: object
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationErrorItem'
+
+    ValidationErrorItem:
+      type: object
+      required: [loc, msg, type]
+      properties:
+        loc:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: integer
+        msg:
+          type: string
+        type:
+          type: string
