@@ -127,15 +127,19 @@ The MSC Server:
 
 ## 5. Specification
 
-### 5.1 Discovery
+### 5.1 Discovery (optional)
 
-A web site that supports MSC MUST publish a manifest at `/.well-known/msc.json` of the following form:
+A web site that supports MSC MAY publish a manifest at `/.well-known/msc.json`
+of the following form. This manifest is informational: it lets clients
+discover the submission endpoint and accepted types out of band, but the
+only endpoint required for the protocol to work is `POST /msc/send`
+(§5.2). The reference server in this revision does not implement the
+discovery endpoint.
 
 ```json
 {
   "msc_version": "0.1",
-  "endpoint": "https://api.example.com/msc/contributions",
-  "status_endpoint": "https://api.example.com/msc/status",
+  "endpoint": "https://api.example.com/msc/send",
   "auth_methods": ["ed25519", "jwt"],
   "accepted_types": ["comment", "edit", "alternative", "translation"],
   "policy_url": "https://example.com/msc/policy",
@@ -149,12 +153,24 @@ A web site that supports MSC MUST publish a manifest at `/.well-known/msc.json` 
 
 ### 5.2 Endpoints
 
+This revision of the protocol exposes a **single public endpoint**:
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/msc/contributions` | Submit a new contribution |
-| GET | `/msc/status/{id}` | Query the status of a contribution |
-| GET | `/msc/capabilities` | (Optional) Human-readable summary of capabilities |
-| GET | `/msc/reputation/{origin}` | (Optional) Origin reputation |
+| POST | `/msc/send` | Submit a signed contribution |
+
+A successful submission returns `202 Accepted` with a JSON body identifying
+the contribution and its initial status (`accepted`, `rejected`, or
+`queued`). The `review_url` field is a hint pointing at the path where a
+future status endpoint would live; it is informational and not yet
+implemented.
+
+Additional endpoints (status queries, list views, moderator decisions,
+audit log access, etc.) are out of scope for this revision. They will be
+specified and added in future revisions **only if needed** — the protocol
+deliberately favours a minimal surface area for the first cut. Implementers
+that need read-side state today can inspect their own local storage
+directly; the wire contract only covers *submission*.
 
 ### 5.3 Authentication and Signing
 
@@ -167,7 +183,7 @@ Every request MUST include:
 Example:
 
 ```
-POST /msc/contributions HTTP/1.1
+POST /msc/send HTTP/1.1
 Host: api.example.com
 Content-Type: application/json
 MSC-Origin: claude-opus-4.1:user:abc123
@@ -179,7 +195,7 @@ MSC-Signature: ed25519:MEUCIQCx...
 
 The recommended signature scheme is Ed25519 over the raw UTF-8 bytes of the request body, encoded as base64url. JWT MAY be supported as an alternative for sites that prefer a token-based flow.
 
-Public keys MAY be published at `GET /msc/keys/{origin}` or in a federated registry (out of scope for this document).
+Public keys are stored server-side out of band. Sites MAY also publish them at `GET /msc/keys/{origin}` or in a federated registry (out of scope for this document).
 
 ### 5.4 Payload
 
@@ -261,9 +277,15 @@ model rotation does not invalidate keys.
 - `[0.7, 0.9)`: high — auto-publish if origin has good reputation.
 - `[0.9, 1.0]`: very high — auto-publish unless site policy forbids.
 
-### 5.7 Rate Limiting
+### 5.7 Rate Limiting (future)
 
-Servers MUST return standard `RateLimit-*` headers as defined in [RFC 9239] and respond with `429 Too Many Requests` when the limits declared in `.well-known/msc.json` are exceeded.
+Servers that expose MSC publicly SHOULD return standard `RateLimit-*`
+headers as defined in [RFC 9239] and respond with `429 Too Many Requests`
+when the limits declared in `.well-known/msc.json` are exceeded.
+
+The reference server in this revision does not implement rate limiting.
+A future revision will add it as a filter ahead of `CachedBodyFilter`,
+keyed by IP and by `MSC-Origin`.
 
 ---
 
@@ -330,13 +352,7 @@ MSC introduces two optional metrics that servers MAY query:
   authenticated origin, not the unauthenticated model string.
 - **`source_consensus`**: degree to which multiple independent contributions on the same source agree — a signal that the correction is sound.
 
-Servers MAY share these metrics via:
-
-```
-GET /msc/reputation/{origin}
-```
-
-Cross-server reputation federation is out of scope for this document (Future Work).
+Servers MAY share these metrics via (out of scope for this revision):
 
 ---
 
@@ -373,7 +389,7 @@ Assistant: I've prepared this contribution:
 After confirmation:
 
 ```http
-POST /msc/contributions HTTP/1.1
+POST /msc/send HTTP/1.1
 Host: api.stackoverflow.com
 MSC-Origin: claude-opus-4.1:user:abc123
 MSC-Origin-Key: ed25519:MCowBQ...
@@ -430,7 +446,10 @@ RateLimit-Remaining: 99
   "user_attribution": "username",
   "license": "CC-BY-SA-4.0",
   "context": {
-    "model_id": "claude-opus-4.1",
+    "model": {
+      "provider": "anthropic",
+      "id": "claude-opus-4.1"
+    },
     "session_hash": "sha256:abcd...",
     "diff": "@@ -10,3 +10,5 @@\n -old\n +new"
   }

@@ -21,7 +21,9 @@ A contribution is a JSON document signed with Ed25519, posted to a site's
 discovery endpoint. The site decides whether to accept, reject, or queue it
 for human review, then records the decision in an append-only audit log.
 
-See [`msc-rfc-protocol.md`](./msc-rfc-protocol.md) for the full specification.
+This revision exposes a **single public endpoint** (`POST /msc/send`).
+Additional endpoints (status, list, decisions, audit) are out of scope
+and will only be added if needed. See [`msc-rfc-protocol.md`](./msc-rfc-protocol.md) for the full specification.
 
 ---
 
@@ -39,12 +41,8 @@ payload-alt.json       (gitignored) example payload — queued for review.
 src/main/java/io/msc/
 ├── MscReferenceServerApplication.java   Spring Boot entry point.
 ├── api/
-│   ├── DiscoveryController             GET /.well-known/msc.json, /msc/capabilities, /msc/policy.
-│   ├── SubmissionController             POST /msc/contributions, GET /msc/status/{id}.
-│   ├── ModerationController             GET /msc/contributions, POST .../decision.
-│   ├── AuditController                  GET /msc/audit.
+│   ├── SubmissionController             POST /msc/send (the only public endpoint).
 │   ├── CachedBodyFilter                 Caches raw request body for signature verification.
-│   ├── RateLimitFilter                  Per-IP / per-origin 100/h rate limit.
 │   ├── exception/
 │   │   ├── MscException                 Domain exception → mapped to HTTP via GlobalExceptionHandler.
 │   │   └── GlobalExceptionHandler       Maps exceptions to JSON error bodies.
@@ -61,9 +59,9 @@ src/main/java/io/msc/
 │   ├── Ed25519Verifier.java             Wire-format signature verification.
 │   └── Base64Url.java                   base64url encoder/decoder.
 ├── service/
-│   └── ContributionService.java         Policy engine: signature, auto-reject, auto-accept, queue, decide.
+│   └── ContributionService.java         Policy engine: signature, auto-reject, auto-accept, queue.
 └── storage/
-    └── MscRepository.java               SQLite repository (5 tables, append-only audit).
+    └── MscRepository.java               SQLite repository (3 tables, append-only audit).
 
 src/main/resources/
 └── application.properties              server.port, msc.db.path.
@@ -95,21 +93,25 @@ generated package is `io.msc.api.generated` (controllers / interfaces) and
 The server listens on `http://localhost:8000`. SQLite is created at
 `./msc.db` (configured via `msc.db.path` in `application.properties`).
 
-### Hit the endpoints with curl
+### Verify the endpoint with curl
 
 ```bash
-# Discovery
-curl -s http://127.0.0.1:8000/.well-known/msc.json | jq .
+# Without auth headers, the server should refuse (400 or 401).
+curl -i -X POST http://127.0.0.1:8000/msc/send
 
-# Capabilities
-curl -s http://127.0.0.1:8000/msc/capabilities | jq .
-
-# Policy
-curl -s http://127.0.0.1:8000/msc/policy | jq .
-
-# Audit log (empty at first)
-curl -s http://127.0.0.1:8000/msc/audit | jq .
+# A real signed submission is shown in the smoke test below.
 ```
+
+That is the only public endpoint. The server also keeps an internal
+SQLite database (`./msc.db`) you can inspect directly:
+
+```bash
+sqlite3 msc.db 'SELECT id, status, decision, moderator_id FROM contributions;'
+sqlite3 msc.db 'SELECT * FROM audit_log ORDER BY id DESC LIMIT 10;'
+```
+
+Future revisions will add HTTP endpoints for status / list / decisions
+**only if needed**; today, the wire contract is intentionally minimal.
 
 ### Smoke test (signed POST)
 
@@ -121,9 +123,11 @@ python3 scripts/smoke_test.py
 The script:
 
 1. Generates an Ed25519 keypair.
-2. Registers the public key in `./msc.db` (the `keys` table).
-3. Reads `payload.json`, signs the bytes, and POSTs to `/msc/contributions`.
-4. Verifies `/msc/status/{id}`, `/msc/contributions`, and `/msc/audit`.
+2. Registers the public key in `./msc.db` (the `keys` table — there is no
+   admin endpoint for key registration, by design).
+3. Reads `payload.json`, signs the bytes, and POSTs to `/msc/send`.
+4. Parses the response and dumps the rows it produced in `contributions`
+   and `audit_log`.
 
 Try both flows:
 
@@ -179,26 +183,29 @@ Generated examples via the live server:
 
 ## Decision pipeline
 
-For every incoming `POST /msc/contributions`:
+For every incoming `POST /msc/send`:
 
-1. **Rate limit** filter bumps the per-IP and per-origin buckets, returns
-   `429` with `RateLimit-Limit` / `RateLimit-Remaining` headers.
-2. **Body cache** filter reads the raw bytes once into a `ThreadLocal` so
+1. **Body cache** filter reads the raw bytes once into a `ThreadLocal` so
    the controller can verify the signature against the *exact* bytes
    that the client signed (otherwise Jackson would re-encode and the
    signature would not match).
-3. **Signature verification**: `Ed25519Verifier.verify(publicKey, body, sig)`.
+2. **Signature verification**: `Ed25519Verifier.verify(publicKey, body, sig)`.
    The public key is fetched from the `keys` table by `MSC-Origin` header.
    Returns `401` on failure.
-4. **Deduplication**: `INSERT` into `contributions` is unique on `id`.
+3. **Deduplication**: `INSERT` into `contributions` is unique on `id`.
    A duplicate id returns `409`.
-5. **Auto-reject filters**: credit-card-shaped digit runs, US-SSN shape,
+4. **Auto-reject filters**: credit-card-shaped digit runs, US-SSN shape,
    `password=...`, `api_key=...`. Match → `202 status=rejected` with
    reason.
-6. **Auto-accept policy**: `confidence ≥ 0.7` *and* `type ∈ {comment, related}`
+5. **Auto-accept policy**: `confidence ≥ 0.7` *and* `type ∈ {comment, related}`
    *and* `user_attribution ≠ real_name` → `202 status=accepted`.
-7. **Otherwise**: `202 status=queued` for human review.
-8. Every decision appends an entry to `audit_log` (append-only, no UPDATE).
+6. **Otherwise**: `202 status=queued` for human review.
+7. Every decision appends an entry to `audit_log` (append-only, no UPDATE).
+
+Rate limiting and per-IP throttling are deliberately **not** implemented
+in this revision. They can be added at the filter layer (before
+`CachedBodyFilter`) when the surface is broadened to a public-facing
+deployment.
 
 ---
 
@@ -211,7 +218,6 @@ SQLite, single file (`./msc.db` by default).
 | `contributions` | One row per submitted contribution. `status`, `decision`, `moderator_id` are mutable; everything else is set on insert. |
 | `keys` | Registered `origin` → `ed25519:<base64url pub>`. `revoked` flag for key rotation. |
 | `audit_log` | Append-only decision trail. `INSERT` only, never UPDATE / DELETE. |
-| `rate_buckets` | Rolling counters keyed by `(bucket, window_start)`. |
 
 Reset by deleting `msc.db`; the schema is recreated on the next boot.
 

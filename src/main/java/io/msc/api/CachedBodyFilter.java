@@ -47,7 +47,7 @@ public class CachedBodyFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
 
         boolean cached = "POST".equals(request.getMethod())
-                && "/msc/contributions".equals(request.getRequestURI());
+                && "/msc/send".equals(request.getRequestURI());
 
         if (cached) {
             byte[] raw = request.getInputStream().readAllBytes();

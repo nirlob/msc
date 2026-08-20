@@ -12,15 +12,16 @@ import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
- * Service layer. Holds the policy engine and orchestrates the persistence
- * and audit log. All business rules live here; controllers are thin shells.
+ * Service layer. Holds the policy engine and orchestrates persistence
+ * for the single public endpoint {@code POST /msc/send}.
  */
 public final class ContributionService {
 
+    /** Auto-accept threshold. High-confidence + safe-type comments and
+     *  "related" links skip the human queue. */
     public static final BigDecimal AUTO_ACCEPT_CONFIDENCE = new BigDecimal("0.7");
-    public static final int RATE_LIMIT_PER_IP = 100;
-    public static final int RATE_LIMIT_PER_ORIGIN = 1000;
 
+    /** Body shapes that get auto-rejected regardless of confidence. */
     private static final List<Pattern> AUTO_REJECT_PATTERNS = List.of(
         // 13-19 digits, allowing spaces or dashes between groups (credit cards etc.)
         Pattern.compile("(?:\\d[\\s-]?){12,18}\\d"),
@@ -71,6 +72,8 @@ public final class ContributionService {
      * @param signatureWire  "ed25519:&lt;base64url&gt;" of body
      * @param rawBody        exact UTF-8 bytes the client signed
      * @param dto            parsed contribution (same content as rawBody)
+     * @return empty when the origin is unknown or the signature is invalid;
+     *         otherwise the {@link SubmissionResult}.
      */
     public Optional<SubmissionResult> submit(String origin, String publicKeyWire,
                                              String signatureWire, byte[] rawBody,
@@ -159,34 +162,11 @@ public final class ContributionService {
     }
 
     /**
-     * Record a moderator decision. Throws if the contribution does not exist.
+     * Look up a contribution by id. Used by the controller to distinguish
+     * "unknown origin" (401) from "bad signature" (401) for an otherwise
+     * well-formed submission.
      */
-    public void decide(String contributionId, Decision decision,
-                       String reason, String moderatorId) {
-        var c = repo.getContribution(contributionId)
-            .orElseThrow(() -> new IllegalArgumentException("contribution not found"));
-        c.recordDecision(decision, reason, moderatorId, Instant.now());
-        repo.recordDecision(contributionId, decision, reason, moderatorId,
-                            c.statusWire(), Instant.now(), null);
-        repo.appendAudit(contributionId, decision, reason, moderatorId, Instant.now());
-    }
-
     public Optional<io.msc.domain.Contribution> find(String id) {
         return repo.getContribution(id);
-    }
-
-    public List<io.msc.domain.Contribution> list(String statusFilter, int limit) {
-        return repo.listContributions(statusFilter, limit);
-    }
-
-    public List<io.msc.domain.AuditEntry> audit(int limit) {
-        return repo.listAudit(limit);
-    }
-
-    /**
-     * Atomically increment a rate bucket. Returns the new counter value.
-     */
-    public int incrementRate(String bucketKey, String windowStart) {
-        return repo.rateIncrement(bucketKey, windowStart);
     }
 }

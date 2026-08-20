@@ -187,7 +187,8 @@ Before declaring a task done, **all** of these must be true:
    `status: accepted`.
 3. `python3 scripts/smoke_test.py payload-alt.json` returns HTTP 202
    with `status: queued`.
-4. `GET /msc/audit` shows both contributions with their decisions.
+4. `python3 scripts/smoke_test.py` against both `payload.json` and
+   `payload-alt.json` returns `202` with the expected `status` field.
 5. If you touched `openapi.yaml`, the generated sources compile and the
    smoke test still passes against the regenerated client interface.
 
@@ -269,8 +270,8 @@ deployment plan rather than hacking the reference impl into production.
 | Add a DB column | `MscRepository.SCHEMA` and a new method |
 | Change signature algorithm | **STOP.** Update RFC section 5.3 first, then `Ed25519Verifier.java`. |
 | Change the auto-accept threshold | `ContributionService.AUTO_ACCEPT_CONFIDENCE` and the `AUTO_REJECT_PATTERNS` list |
-| Tweak rate limits | `ContributionService.RATE_LIMIT_PER_IP` / `RATE_LIMIT_PER_ORIGIN` |
-| Add a moderator UI | New file `ui/...`; do not touch `server.py` endpoints |
+| Tweak rate limits | Add a new `OncePerRequestFilter` ahead of `CachedBodyFilter` (rate limits are not in this revision by design) |
+| Add a moderator UI | New file `ui/...`; do not touch the existing controllers |
 | Update the smoke test | `scripts/smoke_test.py` |
 
 ---
@@ -282,7 +283,8 @@ Run through this before reporting "done":
 - [ ] `./mvnw -B -ntp clean package` succeeds.
 - [ ] `python3 scripts/smoke_test.py payload.json` → HTTP 202 / `accepted`.
 - [ ] `python3 scripts/smoke_test.py payload-alt.json` → HTTP 202 / `queued`.
-- [ ] `GET /msc/audit` shows both contributions.
+- [ ] `python3 scripts/smoke_test.py` returns HTTP 202 for both
+      `payload.json` and `payload-alt.json`.
 - [ ] If you touched `openapi.yaml`, the generated sources recompile
       cleanly and the controllers still bind.
 - [ ] No generated artefacts (`target/`, `msc.db`, `payload*.json`)

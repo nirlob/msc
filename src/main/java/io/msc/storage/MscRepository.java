@@ -9,15 +9,15 @@ import javax.sql.DataSource;
 import java.math.BigDecimal;
 import java.sql.*;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Optional;
 
 /**
  * SQLite-backed repository. Single source of truth for contributions,
- * origin keys, audit log, and rate buckets.
+ * origin keys, and the append-only audit log.
  *
- * One table per concern, all writes are explicit transactions.
+ * Public API is the minimum needed to support {@code POST /msc/send}:
+ * key lookup, contribution insert, decision update, and audit append.
+ * Everything else (list, rate buckets) is removed.
  */
 public final class MscRepository {
 
@@ -62,13 +62,6 @@ public final class MscRepository {
             timestamp       TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_audit_contrib ON audit_log(contribution_id);
-
-        CREATE TABLE IF NOT EXISTS rate_buckets (
-            bucket_key   TEXT NOT NULL,
-            window_start TEXT NOT NULL,
-            counter      INTEGER NOT NULL,
-            PRIMARY KEY (bucket_key, window_start)
-        );
         """;
 
     private final DataSource dataSource;
@@ -90,15 +83,6 @@ public final class MscRepository {
     }
 
     // ---------- keys ----------
-
-    public void registerKey(String origin, String publicKeyWire, Instant addedAt) {
-        run("INSERT OR REPLACE INTO keys(origin, public_key, revoked, added_at) " +
-            "VALUES (?, ?, 0, ?)", ps -> {
-            ps.setString(1, origin);
-            ps.setString(2, publicKeyWire);
-            ps.setString(3, addedAt.toString());
-        });
-    }
 
     public Optional<OriginKey> getActiveKey(String origin) {
         return queryOne("SELECT origin, public_key, revoked FROM keys " +
@@ -159,17 +143,6 @@ public final class MscRepository {
             MscRepository::mapContribution);
     }
 
-    public List<Contribution> listContributions(String statusFilter, int limit) {
-        String sql = "SELECT * FROM contributions " +
-                     (statusFilter != null ? "WHERE status = ? " : "") +
-                     "ORDER BY created_at DESC LIMIT ?";
-        return query(sql, ps -> {
-            int i = 1;
-            if (statusFilter != null) ps.setString(i++, statusFilter);
-            ps.setInt(i, limit);
-        }, MscRepository::mapContribution);
-    }
-
     public void recordDecision(String contributionId, Decision decision,
                                String reason, String moderatorId,
                                String newStatus, Instant decidedAt,
@@ -204,46 +177,12 @@ public final class MscRepository {
         });
     }
 
-    public List<AuditEntry> listAudit(int limit) {
-        return query("SELECT id, contribution_id, decision, reason, moderator_id, timestamp " +
-                     "FROM audit_log ORDER BY id DESC LIMIT ?",
-            ps -> ps.setInt(1, limit),
-            rs -> new AuditEntry(rs.getLong("id"),
-                                  rs.getString("contribution_id"),
-                                  Decision.valueOf(rs.getString("decision").toUpperCase()),
-                                  rs.getString("reason"),
-                                  rs.getString("moderator_id"),
-                                  Instant.parse(rs.getString("timestamp"))));
-    }
-
-    // ---------- rate limiting ----------
-
-    public int rateIncrement(String bucketKey, String windowStart) {
-        run("INSERT INTO rate_buckets(bucket_key, window_start, counter) " +
-            "VALUES (?, ?, 1) ON CONFLICT(bucket_key, window_start) DO UPDATE " +
-            "SET counter = counter + 1",
-            ps -> {
-            ps.setString(1, bucketKey);
-            ps.setString(2, windowStart);
-        });
-        return rateGet(bucketKey, windowStart);
-    }
-
-    public int rateGet(String bucketKey, String windowStart) {
-        return queryOne("SELECT counter FROM rate_buckets " +
-                        "WHERE bucket_key = ? AND window_start = ?",
-            ps -> {
-            ps.setString(1, bucketKey);
-            ps.setString(2, windowStart);
-        }, rs -> rs.getInt("counter")).orElse(0);
-    }
-
     // ---------- helpers ----------
 
     private static Contribution mapContribution(ResultSet rs) throws SQLException {
         String tagsCsv = rs.getString("tags_csv");
-        List<String> tags = tagsCsv == null || tagsCsv.isEmpty()
-            ? List.of() : List.of(tagsCsv.split(","));
+        java.util.List<String> tags = tagsCsv == null || tagsCsv.isEmpty()
+            ? java.util.List.of() : java.util.List.of(tagsCsv.split(","));
         Contribution c = new Contribution(
             rs.getString("id"),
             rs.getString("origin"),
@@ -259,7 +198,6 @@ public final class MscRepository {
             rs.getString("timestamp"),
             Instant.parse(rs.getString("created_at"))
         );
-        String status = rs.getString("status");
         String decisionWire = rs.getString("decision");
         String decidedAtStr = rs.getString("decided_at");
         Instant decidedAt = decidedAtStr != null ? Instant.parse(decidedAtStr) : null;
@@ -306,20 +244,6 @@ public final class MscRepository {
         } catch (SQLException e) {
             throw new RuntimeException("SQL error: " + sql, e);
         }
-    }
-
-    private <T> List<T> query(String sql, SqlBinder binder, SqlMapper<T> mapper) {
-        List<T> out = new ArrayList<>();
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            binder.bind(ps);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) out.add(mapper.map(rs));
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("SQL error: " + sql, e);
-        }
-        return out;
     }
 
     @FunctionalInterface

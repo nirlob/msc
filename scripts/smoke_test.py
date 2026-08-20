@@ -2,7 +2,13 @@
 """End-to-end smoke test for the MSC Spring Boot server.
 
 Reads a payload from a JSON file, signs it with Ed25519, registers the
-public key in SQLite, POSTs the contribution, and verifies status / list / audit.
+public key in SQLite, POSTs the contribution to /msc/send, and prints the
+server's response.
+
+This server exposes a single public endpoint, so the smoke test is
+deliberately small: register key, sign, POST, parse response. There is
+no /msc/status, no /msc/audit, no /msc/list yet — those will arrive in
+future revisions.
 
 Usage:
     python3 scripts/smoke_test.py [path/to/payload.json]
@@ -13,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import sqlite3
 import sys
 import urllib.request
@@ -24,8 +29,8 @@ from cryptography.hazmat.primitives.serialization import (
     Encoding, PrivateFormat, PublicFormat, NoEncryption,
 )
 
-BASE_URL = os.environ.get("MSC_BASE", "http://127.0.0.1:8000")
-DB_PATH = os.environ.get("MSC_DB", "./msc.db")
+BASE_URL = "http://127.0.0.1:8000"
+DB_PATH = "msc.db"
 
 
 def b64url(raw: bytes) -> str:
@@ -44,7 +49,8 @@ def main() -> int:
     pub_wire = "ed25519:" + b64url(pub_raw)
     origin = "claude-opus-4.1:demo-user"
 
-    # 2) Register public key in SQLite
+    # 2) Register public key in SQLite (the reference server has no admin
+    #    endpoint for key registration; this is intentional)
     con = sqlite3.connect(DB_PATH)
     con.execute(
         "INSERT OR REPLACE INTO keys(origin, public_key, revoked, added_at) "
@@ -60,9 +66,9 @@ def main() -> int:
     sig = priv.sign(body_bytes)
     sig_wire = "ed25519:" + b64url(sig)
 
-    # 4) POST
+    # 4) POST to the only public endpoint
     req = urllib.request.Request(
-        f"{BASE_URL}/msc/contributions",
+        f"{BASE_URL}/msc/send",
         data=body_bytes,
         method="POST",
         headers={
@@ -74,34 +80,25 @@ def main() -> int:
     )
     try:
         with urllib.request.urlopen(req) as r:
-            print(f"\n[submit] HTTP {r.status}")
+            print(f"\n[send] HTTP {r.status}")
             print(r.read().decode())
     except urllib.error.HTTPError as e:
-        print(f"\n[submit] HTTP {e.code}: {e.read().decode()}")
+        print(f"\n[send] HTTP {e.code}: {e.read().decode()}")
         return 1
 
-    # 5) Status
-    with urllib.request.urlopen(f"{BASE_URL}/msc/status/{cid}") as r:
-        print(f"\n[status] HTTP {r.status}")
-        print(r.read().decode())
-
-    # 6) List
-    with urllib.request.urlopen(f"{BASE_URL}/msc/contributions?limit=5") as r:
-        rows = json.loads(r.read())
-        print(f"\n[list] {len(rows)} contribution(s):")
-        for row in rows:
-            print(f"  {row['id']:<28} {row['status']:<10} {row['origin']}")
-
-    # 7) Audit
-    with urllib.request.urlopen(f"{BASE_URL}/msc/audit?limit=5") as r:
-        rows = json.loads(r.read())
-        print(f"\n[audit] {len(rows)} entries:")
-        for row in rows:
-            print(f"  #{row['id']} {row['timestamp']} {row['decision']:<10} "
-                  f"{row['moderator_id']:<14} "
-                  f"{(row.get('contribution_id') or '-')[:26]} / "
-                  f"{row.get('reason')}")
-
+    # 5) Quick exploration of what the SQLite DB has recorded
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT id, status, decision, moderator_id FROM contributions")
+    print("\n[contributions] rows in msc.db:")
+    for row in cur.fetchall():
+        print(f"  {row[0]:<28} {row[1]:<10} {row[2] or '-':<14} {row[3] or '-'}")
+    cur.execute("SELECT id, contribution_id, decision, moderator_id, reason "
+                "FROM audit_log ORDER BY id DESC LIMIT 5")
+    print("\n[audit_log] last 5 rows:")
+    for row in cur.fetchall():
+        print(f"  #{row[0]} cid={(row[1] or '-'):<28} {row[2]:<12} {row[3]:<14} {row[4] or ''}")
+    con.close()
     return 0
 
 
