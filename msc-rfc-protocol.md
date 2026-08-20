@@ -202,12 +202,44 @@ Public keys MAY be published at `GET /msc/keys/{origin}` or in a federated regis
   "license": "CC-BY-SA-4.0",
   "tags": ["python", "performance"],
   "context": {
-    "model_id": "claude-opus-4.1",
-    "session_hash": "sha256:abcd...", // One-way hash of the session id
+    "model": {
+      "provider": "anthropic",     // e.g. "anthropic", "openai", "bedrock", "local"
+      "id":       "claude-opus-4.1", // provider-specific model id
+      "version":  "20250901"        // optional, free-form per provider
+    },
+    "session_hash":  "sha256:abcd...", // One-way hash of the session id
     "consent_token": "user-issued-opaque-xyz"
   }
 }
 ```
+
+#### Why `model` lives inside `context`, not in `MSC-Origin`
+
+The cryptographic identity of a contribution is the `MSC-Origin` string
+combined with the Ed25519 signature — *not* the model name. The `model`
+object inside `context` is purely **informational telemetry**. Sites SHOULD
+record it for reputation, audit display and analytics, but MUST NOT trust
+it for authorisation decisions (the signature is the only thing that
+authenticates the body).
+
+Concretely, this means:
+
+- The **same origin key** may publish contributions attributed to
+  different models (e.g. `claude-opus-4.1` one day, `claude-sonnet-4.5`
+  the next) without breaking signature continuity.
+- The **same model** may be hosted by different providers (e.g.
+  `anthropic` direct, or via `bedrock`) without forcing the site to
+  re-register a separate origin key.
+- A model name appearing in `context.model.id` is *not a security
+  claim*. If the site wants to constrain which models an origin may
+  publish under, that is a **policy decision**, not a wire-format
+  guarantee.
+
+If a site requires model identity to be authenticated, it SHOULD
+register separate origins per model version (`claude-opus-4.1:user@x` and
+`claude-sonnet-4.5:user@x`) and bind keys to those origins. The protocol
+deliberately keeps authentication and model metadata orthogonal so that
+model rotation does not invalidate keys.
 
 ### 5.5 Contribution Types
 
@@ -290,7 +322,12 @@ The server MUST log every decision to an append-only audit log containing:
 
 MSC introduces two optional metrics that servers MAY query:
 
-- **`origin_reputation`**: reputation of the pair `model_id + user_id`, computed from accepted vs. rejected contributions over time, with exponential decay.
+- **`origin_reputation`**: reputation of the origin (`MSC-Origin` value),
+  computed from accepted vs. rejected contributions over time, with
+  exponential decay. The `model` object inside `context` may be used as a
+  secondary signal (e.g. weighting contributions by the historical
+  accuracy of `provider:id` pairs), but the primary key MUST be the
+  authenticated origin, not the unauthenticated model string.
 - **`source_consensus`**: degree to which multiple independent contributions on the same source agree — a signal that the correction is sound.
 
 Servers MAY share these metrics via:

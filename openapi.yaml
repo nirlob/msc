@@ -25,9 +25,14 @@ info:
 
     All write endpoints require three headers:
 
-      - `MSC-Origin`     — `model_id:user_id`
+      - `MSC-Origin`     — `model_id:user_id` (cryptographic identity)
       - `MSC-Origin-Key` — `ed25519:<base64url>` public key
       - `MSC-Signature`  — `ed25519:<base64url>` of the request body
+
+    The specific model + provider that authored the contribution is carried
+    as a non-authenticated informational field inside
+    `Contribution.context.model`, so rotating models does not require
+    re-issuing keys. See RFC §5.4.
 
     See `msc-rfc-protocol.md` for the full specification.
   contact:
@@ -162,9 +167,11 @@ paths:
               license: CC-BY-SA-4.0
               tags: [python, asyncio]
               context:
-                model_id: claude-opus-4.1
+                model:
+                  provider: anthropic
+                  id: claude-opus-4.1
                 session_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-                consent_token: 'tok-01m0gj31jq70wxxjm3sjs61p7t'
+                consent_token: tok-01m0gj31jq70wxxjm3sjs61p7t
       responses:
         "202":
           description: |
@@ -507,12 +514,17 @@ components:
 
     Context:
       type: object
-      required: [model_id, session_hash, consent_token]
+      required: [model, session_hash, consent_token]
       properties:
-        model_id:
-          type: string
-          minLength: 1
-          maxLength: 128
+        model:
+          $ref: '#/components/schemas/Model'
+          description: |
+            Identity of the model that produced this contribution. The pair
+            `provider` + `id` is informational only; authentication is based
+            solely on the Ed25519 signature under `MSC-Origin`. The same
+            origin may publish contributions attributed to different
+            model versions or hosted under different providers without
+            breaking signature continuity.
         session_hash:
           type: string
           pattern: '^sha256:[a-f0-9]{64}$'
@@ -523,6 +535,37 @@ components:
         diff:
           type: string
           maxLength: 20000
+
+    Model:
+      type: object
+      required: [provider, id]
+      description: |
+        Identifies the model that authored the contribution body. This is
+        *informational*, not authenticated: the cryptographic identity is
+        carried by the Ed25519 signature on `MSC-Origin`, not by this
+        field. Sites SHOULD use it for reputation, telemetry and audit
+        display, but MUST NOT trust it for authorisation decisions.
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: |
+            Organisation or platform hosting the model
+            (e.g. `anthropic`, `openai`, `google`, `bedrock`, `local`).
+        id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: |
+            Provider-specific model identifier
+            (e.g. `claude-opus-4.1`, `gpt-5`, `gemini-2.0-pro`).
+        version:
+          type: string
+          maxLength: 64
+          description: |
+            Optional version string (e.g. `20250901`, `v1.2.3`). Free-form;
+            providers define their own convention.
 
     Contribution:
       type: object
