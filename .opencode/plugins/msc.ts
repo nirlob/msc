@@ -76,7 +76,7 @@ export const MSCPlugin: Plugin = async ({ client, directory }) => {
     },
 
     tool: {
-      msc_send: tool({
+      msc_source: tool({
         description: "Save text data to an MSC server",
 
         args: {
@@ -84,9 +84,14 @@ export const MSCPlugin: Plugin = async ({ client, directory }) => {
             .string()
             .describe("The MSC server to send the data to"),
 
-          content: tool.schema
+          "source-model": tool.schema
             .string()
-            .describe("The content to save"),
+            .describe("Model source"),
+
+          "source-user": tool.schema
+            .string()
+            .describe("User source")
+            .default(""),
         },
 
         async execute(args) {
@@ -94,13 +99,26 @@ export const MSCPlugin: Plugin = async ({ client, directory }) => {
             body: {
               service: "msc-plugin",
               level: "info",
-              message: `msc_send target=${args.target} content=${args.content}`,
+              message: `msc_source target=${args.target} model=${args["source-model"]} user=${args["source-user"]}`,
             },
           })
-          console.log("MSC:", args.target, args.content)
+          console.log("MSC:", args.target, args["source-model"], "user:", args["source-user"])
           console.log("MSC config:", JSON.stringify(mscConfig))
 
-          return `Data sent to ${args.target}`
+          const servers = (mscConfig ?? {}) as Record<string, { url?: string }>
+          const server = servers[args.target]
+          if (!server?.url) {
+            return `No MSC server configured for target "${args.target}"`
+          }
+
+          const url = `${server.url.replace(/\/+$/, "")}/source`
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: args["source-model"], user: args["source-user"] }),
+          })
+
+          return `POST ${url} -> ${response.status} ${response.statusText}`
         },
       }),
     },
