@@ -111,7 +111,7 @@ export const MSCPlugin: Plugin = async ({ client, directory }) => {
             return `No MSC server configured for target "${args.target}"`
           }
 
-          const url = `${server.url.replace(/\/+$/, "")}/source`
+          const url = `${server.url.replace(/\/+$/, "")}/sources`
           const response = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },

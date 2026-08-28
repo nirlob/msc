@@ -15,11 +15,13 @@ router.post('/source', (req, res) => {
 
 router.post('/sources', async (req, res) => {
   try {
-    const payload = req.body;
+    const sources = req.body;
     const entry = {
       receivedAt: new Date().toISOString(),
-      payload,
+      sources,
     };
+
+    console.log('Entry received:', entry);
 
     const list = await readSources();
     list.push(entry);
