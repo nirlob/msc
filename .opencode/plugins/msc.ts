@@ -1,6 +1,50 @@
 import { type Plugin, tool } from "@opencode-ai/plugin"
+import { readFile, stat } from "node:fs/promises"
+import { join } from "node:path"
+import { homedir } from "node:os"
 
-export const MSCPlugin: Plugin = async ({ client }) => {
+const CONFIG_FILENAMES = ["config.json", "opencode.json", "opencode.jsonc"] as const
+
+async function parseJsonc(raw: string): Promise<Record<string, unknown>> {
+  const stripped = raw
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1")
+  return JSON.parse(stripped) as Record<string, unknown>
+}
+
+async function readIfExists(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const s = await stat(path)
+    if (!s.isFile()) return null
+    return await parseJsonc(await readFile(path, "utf8"))
+  } catch {
+    return null
+  }
+}
+
+async function readMscConfig(directory: string): Promise<{ path: string; msc: unknown } | null> {
+  const globalDir = join(homedir(), ".config", "opencode")
+  const projectDir = join(directory, ".opencode")
+  const dirs = [globalDir, projectDir]
+  const result: Record<string, unknown> = {}
+  let foundPath: string | null = null
+
+  for (const dir of dirs) {
+    for (const name of CONFIG_FILENAMES) {
+      const path = join(dir, name)
+      const parsed = await readIfExists(path)
+      if (parsed) {
+        Object.assign(result, parsed)
+        foundPath = path
+      }
+    }
+  }
+
+  if (!foundPath) return null
+  return { path: foundPath, msc: result.msc }
+}
+
+export const MSCPlugin: Plugin = async ({ client, directory }) => {
   let mscConfig: unknown
 
   console.log("[msc-plugin] loaded")
@@ -12,21 +56,27 @@ export const MSCPlugin: Plugin = async ({ client }) => {
     },
   })
 
+  const fromFile = await readMscConfig(directory)
+  mscConfig = fromFile?.msc
+  console.log("[msc-plugin] msc config from file:", fromFile?.path, JSON.stringify(mscConfig))
+  await client.app.log({
+    body: {
+      service: "msc-plugin",
+      level: "info",
+      message: `msc config loaded from ${fromFile?.path ?? "(none)"}: ${JSON.stringify(mscConfig)}`,
+    },
+  })
+
   return {
     config: async (input) => {
-      mscConfig = (input as Record<string, unknown>).msc
-      console.log("[msc-plugin] msc config:", JSON.stringify(mscConfig))
-      await client.app.log({
-        body: {
-          service: "msc-plugin",
-          level: "info",
-          message: `msc config loaded: ${JSON.stringify(mscConfig)}`,
-        },
-      })
+      if (mscConfig === undefined) {
+        const fromHook = (input as Record<string, unknown>).msc
+        if (fromHook !== undefined) mscConfig = fromHook
+      }
     },
 
     tool: {
-      msc_save_data: tool({
+      msc_send: tool({
         description: "Save text data to an MSC server",
 
         args: {
@@ -40,8 +90,15 @@ export const MSCPlugin: Plugin = async ({ client }) => {
         },
 
         async execute(args) {
+          await client.app.log({
+            body: {
+              service: "msc-plugin",
+              level: "info",
+              message: `msc_send target=${args.target} content=${args.content}`,
+            },
+          })
           console.log("MSC:", args.target, args.content)
-          console.log("MSC config:", mscConfig)
+          console.log("MSC config:", JSON.stringify(mscConfig))
 
           return `Data sent to ${args.target}`
         },
