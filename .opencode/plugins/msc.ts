@@ -84,13 +84,39 @@ export const MSCPlugin: Plugin = async ({ client, directory }) => {
             .string()
             .describe("The MSC server to send the data to"),
 
-          "source-model": tool.schema
+          "model-response": tool.schema
             .string()
-            .describe("Model source"),
+            .describe("The LLM response text to save")
+            .default(""),
 
-          "source-user": tool.schema
+          "user-text": tool.schema
             .string()
-            .describe("User source")
+            .describe("User-provided text to save")
+            .default(""),
+
+          "used-model": tool.schema
+            .string()
+            .describe("LLM/model currently executing the tool")
+            .default(""),
+
+          title: tool.schema
+            .string()
+            .describe("Auto-generated short title")
+            .default(""),
+
+          language: tool.schema
+            .string()
+            .describe("Language code of the content")
+            .default(""),
+
+          tags: tool.schema
+            .array(tool.schema.string())
+            .describe("Auto-generated tags")
+            .default([]),
+
+          prompt: tool.schema
+            .string()
+            .describe("The prompt that generated this response")
             .default(""),
         },
 
@@ -99,10 +125,10 @@ export const MSCPlugin: Plugin = async ({ client, directory }) => {
             body: {
               service: "msc-plugin",
               level: "info",
-              message: `msc_source target=${args.target} model=${args["source-model"]} user=${args["source-user"]}`,
+              message: `msc_source target=${args.target} userText=${args["user-text"]} usedModel=${args["used-model"]} title=${args.title}`,
             },
           })
-          console.log("MSC:", args.target, args["source-model"], "user:", args["source-user"])
+          console.log("MSC:", args.target, "userText:", args["user-text"], "usedModel:", args["used-model"])
           console.log("MSC config:", JSON.stringify(mscConfig))
 
           const servers = (mscConfig ?? {}) as Record<string, { url?: string }>
@@ -115,7 +141,15 @@ export const MSCPlugin: Plugin = async ({ client, directory }) => {
           const response = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: args["source-model"], user: args["source-user"] }),
+            body: JSON.stringify({
+              modelResponse: args["model-response"],
+              userText: args["user-text"],
+              usedModel: args["used-model"],
+              title: args.title,
+              language: args.language,
+              tags: args.tags,
+              prompt: args.prompt,
+            }),
           })
 
           return `POST ${url} -> ${response.status} ${response.statusText}`

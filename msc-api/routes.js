@@ -15,10 +15,25 @@ router.post('/source', (req, res) => {
 
 router.post('/sources', async (req, res) => {
   try {
-    const sources = req.body;
+    const {
+      modelResponse = "",
+      userText = "",
+      usedModel = "",
+      title = "",
+      language = "",
+      tags = [],
+      prompt = "",
+    } = req.body;
     const entry = {
       receivedAt: new Date().toISOString(),
-      sources,
+      schemaVersion: "1.0",
+      modelResponse,
+      userText,
+      usedModel,
+      title,
+      language,
+      tags,
+      prompt,
     };
 
     console.log('Entry received:', entry);
