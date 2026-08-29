@@ -8,7 +8,7 @@ Sistema para que sitios web externos recojan contenido generado en conversacione
 - El usuario, durante una conversación con el LLM, le pide que una respuesta concreta se envíe al endpoint de la web X.
 - El LLM, a través de un plugin de opencode, hace un POST con la respuesta (y metadata) al endpoint de esa web.
 - La web receptora decide qué hacer con esa "fuente": indexarla, mostrarla, moderarla, etc.
-- El usuario también puede enviar texto propio (campo `source-user`) sin que medie una respuesta del modelo.
+- El usuario también puede enviar texto propio (campo `user-text`) sin que medie una respuesta del modelo.
 
 ## Arquitectura
 
@@ -23,11 +23,13 @@ Sistema para que sitios web externos recojan contenido generado en conversacione
 { "msc": { "<target>": { "url": "http://..." }, ... } }
 ```
 
-- **Plugin**: `.opencode/plugins/msc.ts` registra la tool `msc_source(target, source-model, source-user, used-model)`.
+- **Plugin**: `.opencode/plugins/msc.ts` registra la tool `msc_source(target, model-response, user-text, used-model, title, language, tags, prompt)`.
 - **API**: `msc-api/` es un servicio Express mínimo que persiste entradas en `msc-api/sources.json` (gitignored).
 - **Targets**: configurados por el usuario en `~/.config/opencode/opencode.jsonc` bajo la clave `msc`.
 
 ## Esquema de una entrada
+
+Definido formalmente en `sources.schema.json` (raíz del workspace). Ejemplo:
 
 ```json
 {
@@ -49,8 +51,8 @@ Sistema para que sitios web externos recojan contenido generado en conversacione
 - `title` — título corto autogenerado por el asistente para listados/SEO.
 - `language` — código de idioma del contenido (`es`, `en`...). Autogenerado.
 - `tags` — array de etiquetas autogeneradas.
-- `prompt` — prompt que generó `modelResponse`, para contexto/auditoría.
-- `schemaVersion` — versión del esquema, lo añade el server. Sirve para migraciones futuras.
+- `prompt` — prompt original que generó `modelResponse`, se guarda tal cual (no se autogenera, no se normaliza).
+- `schemaVersion` — versión del esquema, lo añade el server. Sirve para migraciones futuras. Bumpearlo en `routes.js` ante un cambio de forma.
 - `receivedAt` — timestamp del servidor, no del cliente.
 
 ## Convenciones
@@ -60,6 +62,7 @@ Sistema para que sitios web externos recojan contenido generado en conversacione
 - El plugin se recarga solo reiniciando opencode. El servidor API hay que reiniciarlo manualmente (`kill <pid> && node index.js &`).
 - `msc-api/sources.json` está en `.gitignore` — no commitear datos de prueba.
 - Campos nuevos en el body deben añadirse en este orden: declarar en el schema de la tool, enviar en el `fetch`, destructurar y guardar en `routes.js`.
+- **Sincronizar esquema**: cualquier cambio en el payload de `POST /sources` (nuevo campo, rename, required/optional, cambio de tipo) debe reflejarse **en el mismo cambio** en `sources.schema.json` y en el bloque "Esquema de una entrada" de este archivo. El esquema es la fuente de verdad para herramientas externas y para validación futura.
 
 ## Comandos
 
@@ -71,14 +74,15 @@ curl -s http://localhost:3000/health
 # Probar endpoint
 curl -X POST http://localhost:3000/sources \
   -H "Content-Type: application/json" \
-  -d '{"sourceModel":"...","sourceUser":"...","usedModel":"..."}'
+  -d '{"modelResponse":"...","userText":"","usedModel":"...","title":"...","language":"es","tags":["..."],"prompt":"..."}'
 ```
 
 ## Pendiente / ideas
 
+- Validación runtime contra `sources.schema.json` (candidato: `ajv`, añadir como dep).
 - Ampliar `usedModel` a objeto estructurado `{ provider, model, name, capabilities }` consultando `client.config.providers`.
-- Añadir `id` (uuid), `type`, `tags`, `metadata` a las entradas.
-- Añadir `ip`, `userAgent`, `serverId`, `env`, `schemaVersion`, `contentHash`, `status`.
+- Añadir `id` (uuid), `type`, `metadata` a las entradas.
+- Añadir `ip`, `userAgent`, `serverId`, `env`, `contentHash`, `status`.
 - Tests automatizados (candidato: `node:test` builtin para no añadir deps).
 - Múltiples instancias de `msc-api` / sharding del `sources.json`.
 - Plugin equivalente para otros runtimes (no opencode).
